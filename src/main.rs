@@ -1,11 +1,10 @@
 use iced::executor;
-// Import Container and Renderer
 use iced::widget::{
     column, container, row, text, Button, Radio, Scrollable, Space, Container,
 };
 use iced::{
     alignment, Alignment, Application, Border, Color, Command, Element, Length, 
-    Renderer, // Keep Renderer import
+    Renderer,
     Settings, Subscription, Theme,
 };
 use std::time::Duration;
@@ -14,10 +13,6 @@ use sysinfo::{Pid, System};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use directories::ProjectDirs;
-
-// =============================================================
-// CONFIGURATION (No changes)
-// =============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum ThemeChoice {
@@ -88,10 +83,6 @@ impl AppSettings {
     }
 }
 
-// =============================================================
-// APPLICATION (No changes)
-// =============================================================
-
 pub fn main() -> iced::Result {
     tracing_subscriber::fmt::init();
     tracing::info!("Starting System Utilities Application");
@@ -119,6 +110,14 @@ struct SystemData {
     memory_used: f64, 
     memory_total: f64, 
     process_count: usize 
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProcessExportData {
+    pid: usize,
+    name: String,
+    cpu_usage: f32,
+    memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +168,8 @@ enum Message {
     KillProcessConfirmed(Pid),
     KillProcessCancelled,
     ClearStatusMessage,
+    ExportCsvRequested,
+    ExportCsvSaved(Result<String, String>),
 }
 
 impl Application for App {
@@ -310,16 +311,36 @@ impl Application for App {
                 self.last_status_message = None;
                 Command::none()
             }
+            Message::ExportCsvRequested => {
+                let process_list: Vec<ProcessExportData> = self.process_list.iter().map(|p| {
+                    ProcessExportData {
+                        pid: p.pid.as_u32() as usize,
+                        name: p.name.clone(),
+                        cpu_usage: p.cpu_usage,
+                        memory_bytes: p.memory,
+                    }
+                }).collect();
+                Command::perform(App::save_csv(process_list), Message::ExportCsvSaved)
+            }
+            Message::ExportCsvSaved(Ok(path_str)) => {
+                tracing::info!("CSV saved successfully to: {}", path_str);
+                let success_msg = format!("CSV exported to {} ✅", path_str);
+                self.last_status_message = Some(StatusMessage::success(&success_msg));
+                Command::perform(tokio::time::sleep(Duration::from_secs(3)), |_| Message::ClearStatusMessage)
+            }
+            Message::ExportCsvSaved(Err(e)) => {
+                tracing::error!("Failed to save CSV: {}", e);
+                self.last_status_message = Some(StatusMessage::error("Failed to export CSV ⚠️"));
+                Command::perform(tokio::time::sleep(Duration::from_secs(3)), |_| Message::ClearStatusMessage)
+            }
         }
     }
 
-    // Keep explicit signature
     fn view(&self) -> Element<'_, Message, Theme, Renderer> {
         if self.is_loading {
             let content = text("Loading settings...")
                 .size(32)
                 .horizontal_alignment(alignment::Horizontal::Center);
-            // FIX: Use explicit types with Container::new
             return Container::<Message, Theme, Renderer>::new(content)
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -346,7 +367,6 @@ impl Application for App {
                 NotificationLevel::Success => (Color::from_rgb(0.2, 0.6, 0.2), Color::WHITE),
                 NotificationLevel::Error => (Color::from_rgb(0.8, 0.2, 0.2), Color::WHITE),
             };
-            // FIX: Use explicit types with Container::new
             Container::<Message, Theme, Renderer>::new(
                 text(status.message.clone())
                     .style(iced::theme::Text::Color(text_color))
@@ -361,7 +381,6 @@ impl Application for App {
             })
             .into()
         } else {
-            // FIX: Use explicit types with Container::new
             Container::<Message, Theme, Renderer>::new(Space::with_height(0.0))
                 .padding(10)
                 .into()
@@ -378,16 +397,12 @@ impl Application for App {
         .padding(40)
         .align_items(Alignment::Center);
 
-        // Show modal if needed
         if let Some(pid_to_kill) = self.show_kill_confirm {
             let process_name = self.system.process(pid_to_kill)
                                         .map_or("Unknown Process", |p| p.name());
             
-            // FIX: Use explicit types with Container::new
             Container::<Message, Theme, Renderer>::new(
                 column![
-                    // Main content (dimmed)
-                    // FIX: Use explicit types with Container::new
                     Container::<Message, Theme, Renderer>::new(main_content)
                         .width(Length::Fill)
                         .height(Length::Fill)
@@ -395,8 +410,6 @@ impl Application for App {
                             background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.3))),
                             ..Default::default()
                         }),
-                    // Modal dialog centered
-                    // FIX: Use explicit types with Container::new
                     Container::<Message, Theme, Renderer>::new(
                         column![
                             text(format!("Kill Process: {} (PID: {})?", process_name, pid_to_kill)).size(24),
@@ -465,7 +478,38 @@ impl App {
         processes
     }
 
-    // Keep explicit signature
+    async fn save_csv(process_list: Vec<ProcessExportData>) -> Result<String, String> {
+        let path_buf = ProjectDirs::from("com", "YourOrg", "SystemMonitor")
+            .map(|dirs| dirs.data_local_dir().join("processes_export.csv"))
+            .unwrap_or_else(|| PathBuf::from("processes_export.csv")); // Fallback
+
+        let path_str = path_buf.to_string_lossy().to_string();
+
+        if let Some(parent) = path_buf.parent() {
+            if !parent.exists() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let mut wtr = csv::Writer::from_path(path_buf)
+                .map_err(|e| e.to_string())?;
+            
+            for process in process_list {
+                wtr.serialize(process)
+                    .map_err(|e| e.to_string())?;
+            }
+            
+            wtr.flush().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        Ok(path_str)
+    }
+
     fn view_dashboard(&self) -> Element<'_, Message, Theme, Renderer> {
         let header = row![
             text("System Monitor").size(32),
@@ -497,9 +541,7 @@ impl App {
         .into()
     }
 
-    // Keep explicit signature
     fn view_processes(&self) -> Element<'_, Message, Theme, Renderer> {
-        // Keep explicit internal signature
         let process_rows: Element<'_, Message, Theme, Renderer> = self.process_list.iter()
             .fold(column![
                 row![
@@ -508,7 +550,6 @@ impl App {
                     text("CPU %").width(Length::Fixed(100.0)),
                     text("Memory").width(Length::Fixed(100.0)),
                 ].spacing(10).padding(5),
-                // FIX: Use explicit types with Container::new
                 Container::<Message, Theme, Renderer>::new(Space::with_height(2.0))
                     .style(iced::theme::Container::Box)
                     .width(Length::Fill)
@@ -542,7 +583,6 @@ impl App {
             .width(Length::FillPortion(2))
             .height(Length::Fixed(600.0));
 
-        // Keep explicit internal signature
         let detail_pane: Element<'_, Message, Theme, Renderer> = if let Some(pid) = self.selected_process {
             if let Some(process) = self.system.process(pid) {
                 let mem_mb = process.memory() as f64 / (1024.0 * 1024.0);
@@ -566,7 +606,6 @@ impl App {
                 .width(Length::Fill)
                 .into()
             } else {
-                // FIX: Use explicit types with Container::new
                 Container::<Message, Theme, Renderer>::new(text("Process disappeared."))
                     .width(Length::Fill)
                     .align_x(alignment::Horizontal::Center)
@@ -574,7 +613,6 @@ impl App {
                     .into()
             }
         } else {
-            // FIX: Use explicit types with Container::new
             Container::<Message, Theme, Renderer>::new(text("Select a process from the list"))
                 .width(Length::Fill)
                 .align_x(alignment::Horizontal::Center)
@@ -582,22 +620,28 @@ impl App {
                 .into()
         };
 
-        // FIX: Use explicit types with Container::new
         let detail_container = Container::<Message, Theme, Renderer>::new(detail_pane)
             .width(Length::FillPortion(1))
             .height(Length::Fixed(600.0))
             .style(iced::theme::Container::Box);
 
-        row![
+        let content_row = row![
             process_table,
             detail_container,
         ]
         .spacing(20)
-        .width(Length::Fixed(1200.0))
+        .width(Length::Fixed(1200.0));
+        column![
+            content_row,
+            Space::with_height(15),
+            Button::new(text("Export Process List to CSV"))
+                .on_press(Message::ExportCsvRequested)
+                .padding(10)
+        ]
+        .align_items(Alignment::Center)
         .into()
     }
 
-    // Keep explicit signature
     fn view_settings(&self) -> Element<'_, Message, Theme, Renderer> {
         let light_radio = Radio::new(
             "Light Theme",
@@ -613,7 +657,6 @@ impl App {
             Message::ThemeChanged,
         );
 
-        // FIX: Use explicit types with Container::new
         Container::<Message, Theme, Renderer>::new(
             column![
                 text("Application Settings").size(24),
@@ -632,8 +675,6 @@ impl App {
     }
 }
 
-// Keep explicit signature
-// Note: We need 'static lifetime here
 fn create_card(title: &str, value: String) -> Element<'static, Message, Theme, Renderer> {
     let content = column![
         text(title).size(18),
@@ -644,7 +685,6 @@ fn create_card(title: &str, value: String) -> Element<'static, Message, Theme, R
     .padding(20)
     .align_items(Alignment::Center);
 
-    // FIX: Use explicit types with Container::new
     Container::<'static, Message, Theme, Renderer>::new(content)
         .style(|theme: &Theme| {
             let palette = theme.extended_palette();
@@ -663,8 +703,6 @@ fn create_card(title: &str, value: String) -> Element<'static, Message, Theme, R
         .into()
 }
 
-// Keep explicit signature
-// Note: We need 'static lifetime here
 fn create_tab_button(label: &str, tab: Tab, active_tab: Tab) -> Element<'static, Message, Theme, Renderer> {
     let is_active = tab == active_tab;
     Button::new(
@@ -689,14 +727,14 @@ mod tests {
     #[test]
     fn test_sysinfo_data_retrieval() {
         let mut sys = System::new_all();
-        assert!(sys.total_memory() > 0, "ควรอ่านค่า Memory รวมได้");
+        assert!(sys.total_memory() > 0, "Unable to read full Memory info");
         sys.refresh_cpu();
         std::thread::sleep(std::time::Duration::from_millis(250));
         sys.refresh_cpu();
         let cpu_usage = sys.global_cpu_info().cpu_usage();
-        assert!(cpu_usage >= 0.0 && cpu_usage <= 100.0, "CPU Usage ควรอยู่ระหว่าง 0-100");
+        assert!(cpu_usage >= 0.0 && cpu_usage <= 100.0, "CPU Usage need to be between 0-100");
         sys.refresh_processes();
         let process_count = sys.processes().len();
-        assert!(process_count > 0, "ควรมี Process รันอยู่");
+        assert!(process_count > 0, "Need a running process");
     }
 }
